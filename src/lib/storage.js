@@ -1,7 +1,6 @@
-// Drop-in replacement for the Claude-artifact "window.storage" API.
-// shared=false -> browser localStorage (this device only)
-// shared=true  -> the local Express server (server/index.js), so multiple
-//                 devices/tabs pointed at the same server can see the same data.
+// Storage layer for TourLink.
+// shared=false -> this browser's localStorage (personal settings, saved session)
+// shared=true  -> the TourLink server, so every phone in the tour sees the same data.
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3001";
 
@@ -40,16 +39,18 @@ async function del(key, shared = false) {
   return res.json();
 }
 
-async function list(prefix = "", shared = false) {
-  if (!shared) {
-    const keys = Object.keys(localStorage)
-      .filter((k) => k.startsWith(`tl:${prefix}`))
-      .map((k) => k.slice(3));
-    return { keys, prefix, shared: false };
-  }
-  const res = await fetch(`${API_BASE}/api/storage?prefix=${encodeURIComponent(prefix)}`);
+// All shared rows whose key starts with `prefix` (e.g. "tour:4721:loc:"). Returns [{key, value}].
+async function listValues(prefix) {
+  const res = await fetch(`${API_BASE}/api/storage-prefix?prefix=${encodeURIComponent(prefix)}`);
   if (!res.ok) throw new Error(`storage list failed: ${res.status}`);
+  const data = await res.json();
+  return data.items || [];
+}
+
+async function health() {
+  const res = await fetch(`${API_BASE}/api/health`);
+  if (!res.ok) throw new Error("health failed");
   return res.json();
 }
 
-export const storage = { get, set, delete: del, list };
+export const storage = { get, set, delete: del, listValues, health };
