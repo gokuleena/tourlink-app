@@ -35,10 +35,10 @@ const STYLES = `
   font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
   background:var(--ink);
   color:var(--ink);
-  height:calc(100vh - 48px);
-  height:calc(100dvh - 48px);
-  max-height:900px;
-  min-height:560px;
+  height:calc(100vh - 24px);
+  height:calc(100dvh - 24px);
+  max-height:960px;
+  min-height:0;
   max-width:480px;
   margin:0 auto;
   border-radius:22px;
@@ -160,8 +160,11 @@ const STYLES = `
   display:flex;align-items:center;justify-content:center;cursor:pointer;
 }
 
-.tl-content{flex:1;min-height:0;overflow-y:auto;padding:16px 16px 90px;}
-.tl-content::-webkit-scrollbar{width:0px;}
+.tl-content{flex:1;min-height:0;overflow-y:auto;padding:16px 16px 28px;scrollbar-width:thin;scrollbar-color:rgba(27,30,61,.35) transparent;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;}
+.tl-content-chat{padding:0;display:flex;flex-direction:column;overflow:hidden;}
+.tl-chat-list{flex:1;min-height:0;overflow-y:auto;padding:16px;}
+.tl-content::-webkit-scrollbar,.tl-chat-list::-webkit-scrollbar{width:7px;}
+.tl-content::-webkit-scrollbar-thumb,.tl-chat-list::-webkit-scrollbar-thumb{background:rgba(27,30,61,.28);border-radius:8px;}
 
 .tl-card{
   background:var(--paper);border-radius:16px;padding:16px;margin-bottom:14px;
@@ -197,7 +200,7 @@ const STYLES = `
 }
 
 .tl-navbar{
-  position:absolute;left:0;right:0;bottom:0;
+  flex-shrink:0;position:relative;
   background:var(--paper);border-top:1px solid var(--line);
   display:flex;padding:8px 6px 10px;z-index:15;
 }
@@ -220,7 +223,7 @@ const STYLES = `
 .tl-msg-time{font-size:9px;opacity:0.45;margin-top:3px;}
 .tl-chat-input-row{
   display:flex;gap:8px;padding:10px 12px;background:var(--paper);
-  border-top:1px solid var(--line);position:absolute;left:0;right:0;bottom:62px;
+  border-top:1px solid var(--line);flex-shrink:0;
 }
 .tl-chat-input{
   flex:1;border-radius:20px;border:1px solid var(--line);padding:10px 14px;font-size:13.5px;background:var(--sand);
@@ -343,6 +346,11 @@ const STYLES = `
 .tl-app .tl-field label{color:rgba(27,30,61,0.6);}
 .tl-app .tl-ghost-btn{color:var(--ink);border-color:var(--line);}
  .tl-primary-btn:disabled{opacity:0.5;}
+.tl-warn{background:rgba(232,135,30,.15);border:1px solid rgba(232,135,30,.5);color:#f3d9b0;border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.5;margin-bottom:14px;}
+.tl-link-toggle{display:flex;gap:18px;margin:-6px 0 16px;font-size:12.5px;}
+.tl-link-toggle span{cursor:pointer;color:var(--sand-deep);opacity:.65;padding-bottom:2px;}
+.tl-link-toggle span.active{opacity:1;font-weight:700;border-bottom:2px solid var(--saffron);}
+.tl-pin-hint{font-size:11px;color:var(--sand-deep);opacity:.75;margin-top:6px;line-height:1.4;}
 .tl-field-row{display:flex;gap:10px;}
 .tl-field-row .tl-field{flex:1;min-width:0;}
 .tl-call-btn{display:block;text-align:center;background:var(--alert);color:#fff;text-decoration:none;font-weight:800;font-size:14px;padding:13px;border-radius:13px;margin-top:8px;}
@@ -550,6 +558,9 @@ export default function TourLinkApp() {
   const [tourName, setTourName] = useState("");
   const [tripStart, setTripStart] = useState("");
   const [tripEnd, setTripEnd] = useState("");
+  const [guidePin, setGuidePin] = useState("");
+  const [guideMode, setGuideMode] = useState("create"); // create | signin
+  const [storageKind, setStorageKind] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
@@ -620,6 +631,12 @@ export default function TourLinkApp() {
     })();
   }, []);
 
+  // ---- what kind of storage is the server using? (shown as a warning when creating a tour)
+  useEffect(() => {
+    if (stage !== "onboard") return;
+    storage.health().then((h) => setStorageKind(h.storage)).catch(() => {});
+  }, [stage]);
+
   // ---- battery level (Chrome/Android only; other browsers don't expose it) ----
   useEffect(() => {
     if (!navigator.getBattery) return;
@@ -635,7 +652,8 @@ export default function TourLinkApp() {
     pullingRef.current = true;
     try {
       const c = tour.code;
-      const [m, ch, it, so, ex, ga, doc, asess, ahist, cur, locs, dts] = await Promise.all([
+      const [meta, m, ch, it, so, ex, ga, doc, asess, ahist, cur, locs, dts] = await Promise.all([
+        storeGetStrict(`tour:${c}`, true).catch(() => undefined), // null = the tour no longer exists; undefined = couldn't reach the server
         storeGet(`tour:${c}:members`, true),
         storeGet(`tour:${c}:chat`, true),
         storeGet(`tour:${c}:itinerary`, true),
@@ -649,6 +667,11 @@ export default function TourLinkApp() {
         storeListValues(`tour:${c}:loc:`),
         storeGet(`tour:${c}:dates`, true),
       ]);
+      if (meta === null) {
+        await storeSet("tl-session", null, false);
+        resetToOnboard("This tour has ended: the guide deleted it, or the server was reset.");
+        return;
+      }
       if (m) setMembers(m);
       if (ch) setChat(ch);
       if (it) setItinerary(it);
@@ -780,18 +803,23 @@ export default function TourLinkApp() {
     if (!name.trim()) return setError("Enter your name to continue.");
     if (!tourName.trim()) return setError("Give your tour a name.");
     if (tripStart && tripEnd && tripEnd < tripStart) return setError("The trip end date can't be before the start date.");
+    if (!/^\d{4,6}$/.test(guidePin)) return setError("Choose a guide PIN of 4 to 6 digits.");
     setBusy(true);
     try {
+      const guideName = name.trim();
       let code = null;
       for (let i = 0; i < 30; i++) {
         const c = genCode();
-        if (!(await storeGetStrict(`tour:${c}`, true))) { code = c; break; }
+        // the server claims the code and stores the guide PIN (as a hash) in one step
+        const r = await storage.post("/api/tour/create", { code: c, pin: guidePin, meta: { name: tourName.trim(), guideName } });
+        if (r.status === 409) continue; // code already in use - try another
+        if (!r.ok) throw new Error("create failed");
+        code = c;
+        break;
       }
       if (!code) throw new Error("no free code");
       const myId = uid();
-      const guideName = name.trim();
       const meObj = { id: myId, name: guideName, role: "guide", checkedIn: true, lastSeen: timeNow() };
-      await storeSetStrict(`tour:${code}`, { name: tourName.trim(), guideName, createdAt: Date.now() }, true);
       await storeSetStrict(`tour:${code}:members`, [meObj], true);
       await storeSetStrict(`tour:${code}:itinerary`, [], true);
       await storeSetStrict(`tour:${code}:chat`, [systemMsg(`Tour "${tourName.trim()}" created. Share code ${code} with your group.`)], true);
@@ -811,6 +839,34 @@ export default function TourLinkApp() {
       setItinerary([]);
       setTripDatesState(dates);
       setChat([systemMsg(`Tour "${tourName.trim()}" created. Share code ${code} with your group.`)]);
+      setGuidePin("");
+      setTab("home");
+      setStage("app");
+    } catch (e) {
+      setError("Can't reach the TourLink server. Check your internet and try again (the first request after a quiet period can take up to a minute).");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function guideSignIn() {
+    setError("");
+    const code = codeInput.trim();
+    if (!/^\d{4}$/.test(code)) return setError("Enter your tour's 4-digit code.");
+    if (!/^\d{4,6}$/.test(guidePin)) return setError("Enter your guide PIN (4 to 6 digits).");
+    setBusy(true);
+    try {
+      const r = await storage.post("/api/tour/login", { code, pin: guidePin });
+      if (r.status === 429) { setError("Too many wrong tries. Please wait 15 minutes and try again."); return; }
+      if (!r.ok) { setError("Wrong code or PIN."); return; }
+      const t = await storeGetStrict(`tour:${code}`, true);
+      const roster = (await storeGetStrict(`tour:${code}:members`, true)) || [];
+      const g = roster.find((m) => m.role === "guide");
+      if (!t || !g) { setError("This tour's data is missing on the server."); return; }
+      await storeSet("tl-session", { code, tourName: t.name, guideName: t.guideName, myId: g.id, myName: g.name, myRole: "guide" }, false);
+      setTour({ code, name: t.name, guideName: t.guideName });
+      setMe({ id: g.id, name: g.name, role: "guide" });
+      setGuidePin("");
       setTab("home");
       setStage("app");
     } catch (e) {
@@ -851,21 +907,56 @@ export default function TourLinkApp() {
     }
   }
 
-  async function leaveTour() {
-    if (!window.confirm("Leave this tour on this device? Your live location will stop being shared.")) return;
-    if (tour && me) {
-      try { await storage.delete(`tour:${tour.code}:loc:${me.id}`, true); } catch (e) { /* ignore */ }
-    }
-    await storeSet("tl-session", null, false);
+  function resetToOnboard(notice) {
     myPosRef.current = null;
     lastWriteRef.current = { ts: 0, lat: null, lng: null };
     seenSosRef.current = null;
     setMyPos(null); setLocations({}); setMembers([]); setChat([]); setItinerary([]); setSos([]);
     setExpenses([]); setGallery([]); setDocuments([]); setAttendanceHistory([]);
     setAttendanceSession({ active: false, stopTitle: "", startTimestamp: null });
-    setCodeInput(""); setError(""); setTripStart(""); setTripEnd("");
+    setCodeInput(""); setGuidePin(""); setError(notice || ""); setTripStart(""); setTripEnd("");
     setTripDatesState({ start: "", end: "", emergency: "" });
     setTour(null); setMe(null); setTab("home"); setStage("onboard");
+  }
+
+  async function leaveTour() {
+    if (!window.confirm("Leave this tour on this device? Your live location will stop being shared. You can join again later with the code.")) return;
+    if (tour && me) {
+      try { await storage.delete(`tour:${tour.code}:loc:${me.id}`, true); } catch (e) { /* ignore */ }
+    }
+    await storeSet("tl-session", null, false);
+    resetToOnboard("");
+  }
+
+  // returns null on success, or a message to show the guide
+  async function deleteTour(pin) {
+    try {
+      const r = await storage.post("/api/tour/delete", { code: tour.code, pin });
+      if (r.status === 429) return "Too many wrong tries. Please wait 15 minutes.";
+      if (!r.ok) return "Wrong PIN.";
+    } catch (e) {
+      return "Can't reach the server. Please try again.";
+    }
+    await storeSet("tl-session", null, false);
+    resetToOnboard("The tour was deleted.");
+    return null;
+  }
+
+  function exportTour() {
+    const data = {
+      exportedAt: new Date().toISOString(),
+      tour: { code: tour.code, name: tour.name, guide: tour.guideName },
+      tripDates, currency, members, itinerary, expenses, attendanceHistory, chat,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tourlink-${tour.code}-${todayISO()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
   async function sendMessage(text) {
@@ -1086,35 +1177,52 @@ export default function TourLinkApp() {
           <div className="tl-hero-sub">Chat, itinerary, live location, check-ins and a one-tap SOS — one place your whole tour can rely on.</div>
 
           <div className="tl-role-row">
-            <div className={`tl-role-btn ${role === "guide" ? "active" : ""}`} onClick={() => setRole("guide")}>
+            <div className={`tl-role-btn ${role === "guide" ? "active" : ""}`} onClick={() => { setRole("guide"); setError(""); }}>
               Tour Guide
               <div className="sub">Create a tour, manage the group</div>
             </div>
-            <div className={`tl-role-btn ${role === "member" ? "active" : ""}`} onClick={() => setRole("member")}>
+            <div className={`tl-role-btn ${role === "member" ? "active" : ""}`} onClick={() => { setRole("member"); setError(""); }}>
               Tour Member
               <div className="sub">Join with a 4-digit code</div>
             </div>
           </div>
 
-          <div className="tl-field">
-            <label>Your name</label>
-            <input className="tl-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="e.g. Asha Menon" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
+          {role === "guide" && (
+            <div className="tl-link-toggle">
+              <span className={guideMode === "create" ? "active" : ""} onClick={() => { setGuideMode("create"); setError(""); }}>Create a new tour</span>
+              <span className={guideMode === "signin" ? "active" : ""} onClick={() => { setGuideMode("signin"); setError(""); }}>Sign in to my tour</span>
+            </div>
+          )}
 
-          {role === "guide" ? (
+          {role === "guide" && guideMode === "create" && storageKind === "file" && !["localhost", "127.0.0.1"].includes(window.location.hostname) && (
+            <div className="tl-warn">
+              Heads-up: this server only has temporary storage, so tours can be erased when it restarts or sleeps. Set up permanent storage (Upstash) before a real trip.
+            </div>
+          )}
+
+          {(role === "member" || guideMode === "create") && (
+            <div className="tl-field">
+              <label>Your name</label>
+              <input className="tl-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="e.g. Asha Menon" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+          )}
+
+          {role === "guide" && guideMode === "create" && (
             <div className="tl-field">
               <label>Tour name</label>
               <input className="tl-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="e.g. Summer Study Tour" value={tourName} onChange={(e) => setTourName(e.target.value)} />
             </div>
-          ) : (
+          )}
+
+          {(role === "member" || guideMode === "signin") && (
             <div className="tl-field">
-              <label>Tour joining code</label>
+              <label>{role === "member" ? "Tour joining code" : "Your tour's 4-digit code"}</label>
               <input className="tl-input" inputMode="numeric" maxLength={4} placeholder="4721" value={codeInput}
                 onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, "").slice(0, 4))} />
             </div>
           )}
 
-          {role === "guide" && (
+          {role === "guide" && guideMode === "create" && (
             <div className="tl-field-row">
               <div className="tl-field"><label>Trip start (optional)</label>
                 <input className="tl-input" type="date" style={{ colorScheme: "dark" }} value={tripStart} onChange={(e) => setTripStart(e.target.value)} /></div>
@@ -1123,10 +1231,22 @@ export default function TourLinkApp() {
             </div>
           )}
 
+          {role === "guide" && (
+            <div className="tl-field">
+              <label>{guideMode === "create" ? "Choose a guide PIN (4 to 6 digits)" : "Your guide PIN"}</label>
+              <input className="tl-input" type="password" inputMode="numeric" maxLength={6} placeholder="••••" value={guidePin}
+                onChange={(e) => setGuidePin(e.target.value.replace(/\D/g, "").slice(0, 6))} />
+              {guideMode === "create" && (
+                <div className="tl-pin-hint">Keep it safe. You need it to sign in as guide on another phone and to delete the tour. Members never need it.</div>
+              )}
+            </div>
+          )}
+
           {error && <div className="tl-err">{error}</div>}
 
-          <button className="tl-primary-btn" disabled={busy} onClick={role === "guide" ? createTour : joinTour}>
-            {busy ? "Connecting…" : role === "guide" ? <>Create tour <ChevronRight size={16} /></> : <>Join tour <ChevronRight size={16} /></>}
+          <button className="tl-primary-btn" disabled={busy}
+            onClick={role === "member" ? joinTour : guideMode === "create" ? createTour : guideSignIn}>
+            {busy ? "Connecting…" : role === "member" ? <>Join tour <ChevronRight size={16} /></> : guideMode === "create" ? <>Create tour <ChevronRight size={16} /></> : <>Sign in as guide <ChevronRight size={16} /></>}
           </button>
           <div style={{ fontSize: 11, color: "var(--sand-deep)", opacity: 0.7, textAlign: "center", marginTop: 14 }}>
             Anyone who has your 4-digit code can join and see this tour's chat and locations. Share it only with your group.
@@ -1165,7 +1285,7 @@ export default function TourLinkApp() {
           </div>
         )}
 
-        <div className="tl-content">
+        <div className={`tl-content${tab === "chat" ? " tl-content-chat" : ""}`}>
           {tab === "home" && (
             <HomeTab tripDates={tripDates} me={me} isGuide={isGuide} tour={tour} members={members} itinerary={itinerary}
               activeSos={activeSos} resolveSos={resolveSos} checkedInCount={checkedInCount} setTab={setTab}
@@ -1193,7 +1313,8 @@ export default function TourLinkApp() {
               locations={locations} myPos={myPos} onShowOnMap={onShowOnMap}
               addMockMembers={addMockMembers} moveMockMembers={moveMockMembers} removeMockMembers={removeMockMembers}
               triggerTestSos={triggerTestSos} seedTestChat={seedTestChat}
-              loadSampleItinerary={loadSampleItinerary} resetTourData={resetTourData} sos={sos} />
+              loadSampleItinerary={loadSampleItinerary} resetTourData={resetTourData} sos={sos}
+              onExport={exportTour} onDeleteTour={deleteTour} />
           )}
         </div>
 
@@ -1402,12 +1523,13 @@ function HomeTab({ tripDates, me, isGuide, tour, members, itinerary, activeSos, 
 /* ---------------- CHAT ---------------- */
 function ChatTab({ chat, me, onSend }) {
   const [text, setText] = useState("");
-  const endRef = useRef(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [chat.length]);
+  const listRef = useRef(null);
+  useEffect(() => { const el = listRef.current; if (el) el.scrollTop = el.scrollHeight; }, [chat.length]);
+  const send = () => { if (text.trim()) { onSend(text); setText(""); } };
 
   return (
-    <div style={{ marginBottom: -90 }}>
-      <div style={{ paddingBottom: 60 }}>
+    <>
+      <div className="tl-chat-list" ref={listRef}>
         {chat.length === 0 && <div className="tl-empty">No messages yet. Say hello to the group.</div>}
         {chat.map((m) =>
           m.system ? (
@@ -1421,15 +1543,14 @@ function ChatTab({ chat, me, onSend }) {
             </div>
           )
         )}
-        <div ref={endRef} />
       </div>
       <div className="tl-chat-input-row">
         <input className="tl-chat-input" placeholder="Message the group…" value={text}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && text.trim()) { onSend(text); setText(""); } }} />
-        <button className="tl-send-btn" onClick={() => { if (text.trim()) { onSend(text); setText(""); } }}><Send size={16} /></button>
+          onKeyDown={(e) => { if (e.key === "Enter") send(); }} />
+        <button className="tl-send-btn" onClick={send}><Send size={16} /></button>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -1509,6 +1630,7 @@ function ItineraryTab({ itinerary, isGuide, onAdd, onDelete, tripDates, setTripD
   const [selected, setSelected] = useState(initialSelected);
   const [cursor, setCursor] = useState(() => { const d = parseISO(initialSelected()); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [view, setView] = useState("calendar");
+  const [editing, setEditing] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const blank = (date) => ({ date, time: "", title: "", location: "", notes: "", type: "sight" });
   const [form, setForm] = useState(blank(selected));
@@ -1574,7 +1696,12 @@ function ItineraryTab({ itinerary, isGuide, onAdd, onDelete, tripDates, setTripD
             Local emergency number: <a href={`tel:${tripDates.emergency.replace(/[^\d+]/g, "")}`} style={{ color: "var(--teal)", fontWeight: 700 }}>{tripDates.emergency}</a>
           </div>
         )}
-        {isGuide && (
+        {isGuide && !editing && (
+          <button className="tl-mini-btn" style={{ marginTop: tripDates.start || tripDates.emergency ? 10 : 0, padding: "8px 12px", fontSize: 12 }} onClick={() => setEditing(true)}>
+            {tripDates.start || tripDates.emergency ? "Edit trip details" : "Set trip dates & emergency number"}
+          </button>
+        )}
+        {isGuide && editing && (
           <>
             <div className="tl-field-row">
               <div className="tl-field" style={{ marginBottom: 8 }}><label>Start date</label>
@@ -1584,7 +1711,8 @@ function ItineraryTab({ itinerary, isGuide, onAdd, onDelete, tripDates, setTripD
             </div>
             <div className="tl-field" style={{ marginBottom: 10 }}><label>Local emergency number (optional)</label>
               <input className="tl-input" inputMode="tel" placeholder="e.g. 112 or 911" maxLength={16} value={dEmerg} onChange={(e) => setDEmerg(e.target.value)} /></div>
-            <button className="tl-primary-btn" disabled={!datesChanged} onClick={saveDates}>Save trip details</button>
+            <button className="tl-primary-btn" disabled={!datesChanged} onClick={() => { saveDates(); setEditing(false); }}>Save trip details</button>
+            <button className="tl-ghost-btn" onClick={() => setEditing(false)}>Cancel</button>
           </>
         )}
       </div>
@@ -1860,13 +1988,13 @@ function MoreTab(props) {
     expenses, addExpense, currency, setCurrency, gallery, addGalleryPost, documents, addDocument,
     tour, itinerary, tripDates, locations, myPos, onShowOnMap,
     addMockMembers, moveMockMembers, removeMockMembers, triggerTestSos, seedTestChat,
-    loadSampleItinerary, resetTourData, sos } = props;
+    loadSampleItinerary, resetTourData, sos, onExport, onDeleteTour } = props;
   const [section, setSection] = useState("members");
 
   const segments = [
     ["members", "Attendance"], ["ai", "AI Assistant"], ["translate", "Translate"], ["expenses", "Expenses"], ["gallery", "Gallery"], ["documents", "Documents"],
   ];
-  if (isGuide) segments.push(["test", "Test Tools"]);
+  if (isGuide) segments.push(["settings", "Tour"], ["test", "Test Tools"]);
 
   return (
     <div>
@@ -1889,12 +2017,83 @@ function MoreTab(props) {
       {section === "expenses" && <ExpensesSection members={members} me={me} isGuide={isGuide} expenses={expenses} addExpense={addExpense} currency={currency} setCurrency={setCurrency} />}
       {section === "gallery" && <GallerySection gallery={gallery} me={me} addGalleryPost={addGalleryPost} />}
       {section === "documents" && <DocumentsSection documents={documents} me={me} isGuide={isGuide} addDocument={addDocument} />}
+      {section === "settings" && isGuide && (
+        <TourSettingsSection tour={tour} members={members} onExport={onExport} onDeleteTour={onDeleteTour} />
+      )}
       {section === "test" && isGuide && (
         <TestToolsSection members={members} sos={sos} tour={tour}
           addMockMembers={addMockMembers} moveMockMembers={moveMockMembers} removeMockMembers={removeMockMembers}
           triggerTestSos={triggerTestSos} seedTestChat={seedTestChat}
           loadSampleItinerary={loadSampleItinerary} resetTourData={resetTourData} />
       )}
+    </div>
+  );
+}
+
+function TourSettingsSection({ tour, members, onExport, onDeleteTour }) {
+  const [confirming, setConfirming] = useState(false);
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState(null);
+  useEffect(() => { storage.health().then(setHealth).catch(() => setHealth({ ok: false })); }, []);
+
+  async function doDelete() {
+    setErr("");
+    setBusy(true);
+    const problem = await onDeleteTour(pin);
+    setBusy(false);
+    if (problem) setErr(problem);
+  }
+
+  return (
+    <div>
+      <div className="tl-card">
+        <div className="tl-card-title"><Ticket size={16} color="var(--saffron-deep)" /> {tour.name}</div>
+        <div style={{ fontSize: 13 }}>Joining code <strong className="tl-mono">{tour.code}</strong> · {members.length} member{members.length === 1 ? "" : "s"}</div>
+        <div style={{ fontSize: 12, color: "rgba(27,30,61,0.6)", marginTop: 8, lineHeight: 1.5 }}>
+          To open this tour as guide on another phone, choose <strong>Tour Guide → Sign in to my tour</strong> and enter this code and your guide PIN.
+        </div>
+        {health && health.ok && health.storage === "file" && (
+          <div style={{ fontSize: 12, color: "var(--alert)", marginTop: 8, lineHeight: 1.5 }}>
+            Warning: this server uses temporary storage, so the tour is erased when the server restarts or sleeps. Set up permanent storage (Upstash) before relying on it.
+          </div>
+        )}
+        {health && health.ok && health.storage === "redis" && (
+          <div style={{ fontSize: 12, color: "var(--success)", marginTop: 8 }}>Stored permanently. It stays until you delete it (or a year passes).</div>
+        )}
+      </div>
+
+      <div className="tl-card">
+        <div className="tl-card-title"><FileText size={16} color="var(--saffron-deep)" /> Keep a copy</div>
+        <div style={{ fontSize: 12, color: "rgba(27,30,61,0.6)", marginBottom: 10, lineHeight: 1.5 }}>
+          Download the members list, itinerary, attendance history, expenses and chat as a file before you delete the tour.
+        </div>
+        <button className="tl-primary-btn" onClick={onExport}>Download tour data</button>
+      </div>
+
+      <div className="tl-card" style={{ borderColor: "rgba(214,69,69,0.4)" }}>
+        <div className="tl-card-title" style={{ color: "var(--alert)" }}><AlertTriangle size={16} color="var(--alert)" /> Delete this tour</div>
+        <div style={{ fontSize: 12, color: "rgba(27,30,61,0.65)", marginBottom: 10, lineHeight: 1.5 }}>
+          After the tour is over you can erase it. This permanently removes the member list, chat, itinerary, expenses and locations for everyone. It can't be undone.
+        </div>
+        {!confirming ? (
+          <button className="tl-ghost-btn" style={{ borderColor: "var(--alert)", color: "var(--alert)", marginTop: 0 }} onClick={() => setConfirming(true)}>Delete this tour…</button>
+        ) : (
+          <>
+            <div className="tl-field" style={{ marginBottom: 10 }}>
+              <label>Enter your guide PIN to confirm</label>
+              <input className="tl-input" type="password" inputMode="numeric" maxLength={6} placeholder="Guide PIN" value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))} />
+            </div>
+            {err && <div style={{ fontSize: 12, color: "var(--alert)", marginBottom: 8 }}>{err}</div>}
+            <button className="tl-primary-btn" style={{ background: "var(--alert)", color: "#fff" }} disabled={busy || pin.length < 4} onClick={doDelete}>
+              {busy ? "Deleting…" : "Delete permanently"}
+            </button>
+            <button className="tl-ghost-btn" onClick={() => { setConfirming(false); setPin(""); setErr(""); }}>Cancel</button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

@@ -53,4 +53,16 @@ async function health() {
   return res.json();
 }
 
-export const storage = { get, set, delete: del, listValues, health };
+// POST a JSON body to a server endpoint; returns { ok, status, data } and never throws on HTTP errors.
+async function post(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* no body */ }
+  return { ok: res.ok, status: res.status, data };
+}
+
+export const storage = { get, set, delete: del, listValues, health, post };
