@@ -65,4 +65,12 @@ async function post(path, body) {
   return { ok: res.ok, status: res.status, data };
 }
 
-export const storage = { get, set, delete: del, listValues, health, post };
+// GET a JSON endpoint with optional headers; returns { ok, status, data } and never throws on HTTP errors.
+async function getJson(path, headers = {}) {
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  let data = {};
+  try { data = await res.json(); } catch (e) { data = {}; }
+  return { ok: res.ok, status: res.status, data };
+}
+
+export const storage = { get, set, delete: del, listValues, health, post, getJson };

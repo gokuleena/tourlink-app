@@ -7,7 +7,7 @@ import {
   FileText, AlertTriangle, Send, Plus, Battery, CheckCircle2, X, ChevronRight,
   Compass, Ticket, LogOut, Clock, Utensils, Hotel, Bus, ShoppingBag, Sunrise,
   UserCircle2, Shield, Navigation2, Radio, Heart, Skull, CloudRain, Baby, Search,
-  Sparkles, Loader2, Languages
+  Sparkles, Loader2, Languages, Phone, MessageSquare
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -346,6 +346,11 @@ const STYLES = `
 .tl-app .tl-field label{color:rgba(27,30,61,0.6);}
 .tl-app .tl-ghost-btn{color:var(--ink);border-color:var(--line);}
  .tl-primary-btn:disabled{opacity:0.5;}
+.tl-offline-strip{background:#7a4a0c;color:#fff;font-size:12px;font-weight:600;padding:8px 14px;line-height:1.45;}
+.tl-sms-bar{display:flex;align-items:center;justify-content:center;gap:6px;background:var(--teal);color:#fff;text-decoration:none;font-size:12.5px;font-weight:700;padding:9px;flex-shrink:0;}
+.tl-sos-offline{border-top:1px solid var(--line);padding-top:12px;margin-bottom:12px;}
+.tl-place-pin{width:26px;height:26px;border-radius:8px;background:var(--teal);color:#fff;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font:800 12px 'Inter',sans-serif;box-shadow:0 2px 6px rgba(0,0,0,.35);}
+.tl-place-center{width:26px;height:26px;border-radius:50%;background:var(--ink);color:var(--saffron);border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 2px 6px rgba(0,0,0,.35);}
 .tl-warn{background:rgba(232,135,30,.15);border:1px solid rgba(232,135,30,.5);color:#f3d9b0;border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.5;margin-bottom:14px;}
 .tl-link-toggle{display:flex;gap:18px;margin:-6px 0 16px;font-size:12.5px;}
 .tl-link-toggle span{cursor:pointer;color:var(--sand-deep);opacity:.65;padding-bottom:2px;}
@@ -471,6 +476,40 @@ function defaultCurrency() {
   return "$";
 }
 
+/* ---- phone / SMS / direction helpers (these work on the phone's own signal and GPS, without internet) ---- */
+function cleanPhone(p) {
+  const t = String(p || "").trim();
+  const d = t.replace(/\D/g, "");
+  return d ? (t.startsWith("+") ? "+" : "") + d : "";
+}
+function validPhone(p) {
+  const d = String(p || "").replace(/\D/g, "");
+  return d.length >= 7 && d.length <= 15;
+}
+function smsHref(numbers, body) {
+  const sep = /iPhone|iPad|iPod/i.test(navigator.userAgent || "") ? "&" : "?";
+  return `sms:${numbers.join(",")}${sep}body=${encodeURIComponent(body)}`;
+}
+function mapsLink(lat, lng) { return `https://maps.google.com/?q=${lat},${lng}`; }
+function bearingDeg(lat1, lng1, lat2, lng2) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const y = Math.sin(rad(lng2 - lng1)) * Math.cos(rad(lat2));
+  const x = Math.cos(rad(lat1)) * Math.sin(rad(lat2)) - Math.sin(rad(lat1)) * Math.cos(rad(lat2)) * Math.cos(rad(lng2 - lng1));
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+function cardinal(b) { return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(b / 45) % 8]; }
+
+// A plain-English reason when the AI doesn't answer (instead of a vague "couldn't find an answer").
+function aiErrorMessage(status, data) {
+  const raw = data && data.error ? (data.error.message || data.error) : "";
+  const m = typeof raw === "string" ? raw : "";
+  if (/credit balance/i.test(m)) return "The AI is switched off: the server's Anthropic account has no credits left. The app owner can add credits at console.anthropic.com → Plans & Billing.";
+  if (status === 403) return "This tour isn't on the server any more, so the AI can't be used. Create or join the tour again.";
+  if (status === 429) return m || "Too many AI requests. Please wait a few minutes.";
+  if (/no ANTHROPIC_API_KEY|api key|authentication|x-api-key/i.test(m)) return "The server's AI key is missing or invalid. The app owner needs to check the ANTHROPIC_API_KEY setting on Render.";
+  return `The AI service had a problem (code ${status}). ${m}`.trim();
+}
+
 /* ---- location helpers ---- */
 const STALE_MS = 5 * 60 * 1000; // no update for 5 min = shown as offline / last seen
 function distanceMeters(lat1, lng1, lat2, lng2) {
@@ -561,6 +600,10 @@ export default function TourLinkApp() {
   const [guidePin, setGuidePin] = useState("");
   const [guideMode, setGuideMode] = useState("create"); // create | signin
   const [storageKind, setStorageKind] = useState("");
+  const [phoneInput, setPhoneInput] = useState("");
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
+  const [serverUp, setServerUp] = useState(true);
+  const [outbox, setOutbox] = useState([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
@@ -595,6 +638,9 @@ export default function TourLinkApp() {
   const pullingRef = useRef(false);
   const seenSosRef = useRef(null);
   const toastTimer = useRef(null);
+  const outboxRef = useRef([]);
+  const flushRef = useRef(null);
+  const flushingRef = useRef(false);
 
   function showToast(msg) {
     setToast(msg);
@@ -627,6 +673,7 @@ export default function TourLinkApp() {
       setTour({ code: session.code, name: session.tourName, guideName: session.guideName });
       setMe({ id: session.myId, name: session.myName, role: session.myRole });
       setRole(session.myRole);
+      applyCache(session.code);
       setStage("app");
     })();
   }, []);
@@ -636,6 +683,98 @@ export default function TourLinkApp() {
     if (stage !== "onboard") return;
     storage.health().then((h) => setStorageKind(h.storage)).catch(() => {});
   }, [stage]);
+
+  // ---- online / offline status ----
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+
+  // ---- keep a copy of the tour on this phone so everything still opens without internet ----
+  useEffect(() => {
+    if (stage !== "app" || !tour) return;
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(`tl:cache:${tour.code}`, JSON.stringify({
+          at: Date.now(), members, chat: chat.slice(-200), itinerary, sos, expenses, gallery, documents,
+          currency, tripDates, locations, attendanceSession, attendanceHistory,
+        }));
+      } catch (e) { /* storage full: ignore */ }
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [stage, tour, members, chat, itinerary, sos, expenses, gallery, documents, currency, tripDates, locations, attendanceSession, attendanceHistory]);
+
+  // ---- messages written while offline wait in an outbox and are sent automatically ----
+  useEffect(() => {
+    outboxRef.current = outbox;
+    if (!tour) return;
+    try { localStorage.setItem(`tl:outbox:${tour.code}`, JSON.stringify(outbox)); } catch (e) { /* ignore */ }
+  }, [outbox, tour]);
+
+  useEffect(() => {
+    if (stage !== "app") return;
+    const tryFlush = () => { if (flushRef.current) flushRef.current(); };
+    const iv = setInterval(tryFlush, 4000);
+    window.addEventListener("online", tryFlush);
+    return () => { clearInterval(iv); window.removeEventListener("online", tryFlush); };
+  }, [stage]);
+
+  function applyCache(code) {
+    try {
+      const raw = localStorage.getItem(`tl:cache:${code}`);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c.members) setMembers(c.members);
+        if (c.chat) setChat(c.chat);
+        if (c.itinerary) setItinerary(c.itinerary);
+        if (c.sos) setSos(c.sos);
+        if (c.expenses) setExpenses(c.expenses);
+        if (c.gallery) setGallery(c.gallery);
+        if (c.documents) setDocuments(c.documents);
+        if (c.currency) setCurrencyState(c.currency);
+        if (c.tripDates) setTripDatesState(c.tripDates);
+        if (c.locations) setLocations(c.locations);
+        if (c.attendanceSession) setAttendanceSession(c.attendanceSession);
+        if (c.attendanceHistory) setAttendanceHistory(c.attendanceHistory);
+      }
+      const ob = JSON.parse(localStorage.getItem(`tl:outbox:${code}`) || "[]");
+      if (Array.isArray(ob)) { outboxRef.current = ob; setOutbox(ob); }
+    } catch (e) { /* ignore a damaged copy */ }
+  }
+
+  async function appendOnce(key, setter, item, prepend) {
+    const latest = (await storeGetStrict(key, true)) || [];
+    if (latest.some((x) => x.id === item.id)) return;
+    const updated = prepend ? [item, ...latest] : [...latest, item].slice(-500);
+    await storeSetStrict(key, updated, true);
+    setter(updated);
+  }
+
+  async function flushOutbox() {
+    if (flushingRef.current || !tour || outboxRef.current.length === 0) return;
+    flushingRef.current = true;
+    try {
+      for (const item of [...outboxRef.current]) {
+        try {
+          if (item.kind === "chat") await appendOnce(K("chat"), setChat, item.payload, false);
+          else if (item.kind === "sos") {
+            await appendOnce(K("sos"), setSos, item.payload.entry, true);
+            await appendOnce(K("chat"), setChat, item.payload.note, false);
+          }
+        } catch (e) {
+          break; // still offline: try again later
+        }
+        outboxRef.current = outboxRef.current.filter((o) => o.id !== item.id);
+        setOutbox((cur) => cur.filter((o) => o.id !== item.id));
+      }
+    } finally {
+      flushingRef.current = false;
+    }
+  }
+  flushRef.current = flushOutbox;
 
   // ---- battery level (Chrome/Android only; other browsers don't expose it) ----
   useEffect(() => {
@@ -667,6 +806,7 @@ export default function TourLinkApp() {
         storeListValues(`tour:${c}:loc:`),
         storeGet(`tour:${c}:dates`, true),
       ]);
+      setServerUp(meta !== undefined);
       if (meta === null) {
         await storeSet("tl-session", null, false);
         resetToOnboard("This tour has ended: the guide deleted it, or the server was reset.");
@@ -804,6 +944,7 @@ export default function TourLinkApp() {
     if (!tourName.trim()) return setError("Give your tour a name.");
     if (tripStart && tripEnd && tripEnd < tripStart) return setError("The trip end date can't be before the start date.");
     if (!/^\d{4,6}$/.test(guidePin)) return setError("Choose a guide PIN of 4 to 6 digits.");
+    if (phoneInput.trim() && !validPhone(phoneInput)) return setError("Enter your mobile number with country code, like +63 912 345 6789, or leave it empty.");
     setBusy(true);
     try {
       const guideName = name.trim();
@@ -819,7 +960,7 @@ export default function TourLinkApp() {
       }
       if (!code) throw new Error("no free code");
       const myId = uid();
-      const meObj = { id: myId, name: guideName, role: "guide", checkedIn: true, lastSeen: timeNow() };
+      const meObj = { id: myId, name: guideName, role: "guide", checkedIn: true, lastSeen: timeNow(), ...(phoneInput.trim() ? { phone: cleanPhone(phoneInput) } : {}) };
       await storeSetStrict(`tour:${code}:members`, [meObj], true);
       await storeSetStrict(`tour:${code}:itinerary`, [], true);
       await storeSetStrict(`tour:${code}:chat`, [systemMsg(`Tour "${tourName.trim()}" created. Share code ${code} with your group.`)], true);
@@ -840,6 +981,7 @@ export default function TourLinkApp() {
       setTripDatesState(dates);
       setChat([systemMsg(`Tour "${tourName.trim()}" created. Share code ${code} with your group.`)]);
       setGuidePin("");
+      setPhoneInput("");
       setTab("home");
       setStage("app");
     } catch (e) {
@@ -881,6 +1023,7 @@ export default function TourLinkApp() {
     if (!name.trim()) return setError("Enter your name to continue.");
     const code = codeInput.trim();
     if (!/^\d{4}$/.test(code)) return setError("Enter the 4-digit tour code from your guide.");
+    if (phoneInput.trim() && !validPhone(phoneInput)) return setError("Enter your mobile number with country code, like +63 912 345 6789, or leave it empty.");
     setBusy(true);
     try {
       const t = await storeGetStrict(`tour:${code}`, true);
@@ -890,14 +1033,17 @@ export default function TourLinkApp() {
       const existing = roster.find((m) => m.role !== "guide" && !m.mock && m.name.toLowerCase() === clean.toLowerCase());
       const myId = existing ? existing.id : uid();
       if (!existing) {
-        const meObj = { id: myId, name: clean, role: "member", checkedIn: false, lastSeen: timeNow() };
+        const meObj = { id: myId, name: clean, role: "member", checkedIn: false, lastSeen: timeNow(), ...(phoneInput.trim() ? { phone: cleanPhone(phoneInput) } : {}) };
         await storeSetStrict(`tour:${code}:members`, [...roster, meObj], true);
         const chatNow = (await storeGetStrict(`tour:${code}:chat`, true)) || [];
         await storeSetStrict(`tour:${code}:chat`, [...chatNow, systemMsg(`${clean} joined the tour.`)].slice(-500), true);
+      } else if (phoneInput.trim() && cleanPhone(phoneInput) !== existing.phone) {
+        await storeSetStrict(`tour:${code}:members`, roster.map((m) => (m.id === existing.id ? { ...m, phone: cleanPhone(phoneInput) } : m)), true);
       }
       await storeSet("tl-session", { code, tourName: t.name, guideName: t.guideName, myId, myName: clean, myRole: "member" }, false);
       setTour({ code, name: t.name, guideName: t.guideName });
       setMe({ id: myId, name: clean, role: "member" });
+      setPhoneInput("");
       setTab("home");
       setStage("app");
     } catch (e) {
@@ -908,6 +1054,12 @@ export default function TourLinkApp() {
   }
 
   function resetToOnboard(notice) {
+    try {
+      if (tour) { localStorage.removeItem(`tl:cache:${tour.code}`); localStorage.removeItem(`tl:outbox:${tour.code}`); }
+    } catch (e) { /* ignore */ }
+    outboxRef.current = [];
+    setOutbox([]);
+    setPhoneInput("");
     myPosRef.current = null;
     lastWriteRef.current = { ts: 0, lat: null, lng: null };
     seenSosRef.current = null;
@@ -962,7 +1114,10 @@ export default function TourLinkApp() {
   async function sendMessage(text) {
     if (!text.trim() || !tour) return;
     const msg = { id: uid(), sender: me.name, senderId: me.id, text: text.trim(), time: timeNow() };
-    await mutateList(K("chat"), setChat, (l) => [...l, msg].slice(-500));
+    const item = { id: msg.id, kind: "chat", payload: msg };
+    outboxRef.current = [...outboxRef.current, item];
+    setOutbox((cur) => [...cur, item]);
+    flushOutbox();
   }
 
   async function fileSos(typeId) {
@@ -972,9 +1127,17 @@ export default function TourLinkApp() {
       id: uid(), member: me.name, memberId: me.id, type: type.label, time: timeNow(), resolved: false,
       battery: batteryRef.current, lat: p ? p.lat : null, lng: p ? p.lng : null, acc: p ? p.acc ?? null : null,
     };
+    const note = systemMsg(`🚨 SOS from ${me.name}: ${type.label}.${p ? " Location shared." : " (No location available.)"}`);
+    const item = { id: entry.id, kind: "sos", payload: { entry, note } };
+    outboxRef.current = [...outboxRef.current, item];
+    setOutbox((cur) => [...cur, item]);
     setShowSosModal(false);
-    await mutateList(K("sos"), setSos, (l) => [entry, ...l]);
-    await postSystem(`🚨 SOS from ${me.name}: ${type.label}.${p ? " Location shared." : " (No location available.)"}`);
+    if (!navigator.onLine) showToast("No internet: your SOS is saved and will send automatically. Call or text your guide now.");
+    flushOutbox();
+  }
+
+  async function updateMyPhone(phone) {
+    await mutateList(K("members"), setMembers, (l) => l.map((m) => (m.id === me.id ? { ...m, phone } : m)));
   }
 
   async function resolveSos(id) {
@@ -1242,6 +1405,14 @@ export default function TourLinkApp() {
             </div>
           )}
 
+          {(role === "member" || guideMode === "create") && (
+            <div className="tl-field">
+              <label>Your mobile number (optional)</label>
+              <input className="tl-input" type="tel" inputMode="tel" placeholder="+63 912 345 6789" value={phoneInput} onChange={(e) => setPhoneInput(e.target.value)} />
+              <div className="tl-pin-hint">So you can be called or texted if the internet is down. {role === "member" ? "Only your guide sees it." : "Members see this as the guide's number."}</div>
+            </div>
+          )}
+
           {error && <div className="tl-err">{error}</div>}
 
           <button className="tl-primary-btn" disabled={busy}
@@ -1261,6 +1432,15 @@ export default function TourLinkApp() {
   const checkedInCount = members.filter((m) => m.checkedIn).length;
   const activeSos = sos.filter((s) => !s.resolved);
   const emergencyNumber = (tripDates.emergency || "").replace(/[^\d+]/g, "");
+  const guideEntry = members.find((m) => m.role === "guide");
+  const guidePhone = guideEntry && guideEntry.phone ? cleanPhone(guideEntry.phone) : "";
+  const smsTargets = isGuide ? members.filter((m) => m.id !== me.id && m.phone).map((m) => cleanPhone(m.phone)) : guidePhone ? [guidePhone] : [];
+  const offline = !online || !serverUp;
+  const chatView = [...chat, ...outbox.filter((o) => o.kind === "chat" && !chat.some((c) => c.id === o.payload.id)).map((o) => ({ ...o.payload, pending: true }))];
+  const sosSmsBody = () => {
+    const pos = myPosRef.current || locations[me.id];
+    return `SOS from ${me.name} (${tour.name})! I need help.${pos ? ` My location: ${mapsLink(pos.lat, pos.lng)} (±${pos.acc ?? "?"} m).` : " My GPS location isn't available."}${batteryRef.current != null ? ` Battery ${batteryRef.current}%.` : ""}`;
+  };
 
   return (
     <div className="tl-root">
@@ -1279,6 +1459,13 @@ export default function TourLinkApp() {
           </div>
         </div>
 
+        {offline && (
+          <div className="tl-offline-strip">
+            {!online ? "No internet" : "Can't reach the TourLink server"} — showing saved information.
+            {outbox.length > 0 ? ` ${outbox.length} message${outbox.length > 1 ? "s" : ""} waiting to send.` : " Chat and SOS are saved and send automatically when you're back online."} You can still call or text from Home → Contacts.
+          </div>
+        )}
+
         {activeSos.length > 0 && (
           <div className="tl-sos-strip" onClick={() => setTab("home")}>
             <Radio size={14} /> {activeSos.length} active SOS alert{activeSos.length > 1 ? "s" : ""} — tap to view
@@ -1287,15 +1474,15 @@ export default function TourLinkApp() {
 
         <div className={`tl-content${tab === "chat" ? " tl-content-chat" : ""}`}>
           {tab === "home" && (
-            <HomeTab tripDates={tripDates} me={me} isGuide={isGuide} tour={tour} members={members} itinerary={itinerary}
+            <HomeTab onSavePhone={updateMyPhone} tripDates={tripDates} me={me} isGuide={isGuide} tour={tour} members={members} itinerary={itinerary}
               activeSos={activeSos} resolveSos={resolveSos} checkedInCount={checkedInCount} setTab={setTab}
               attendanceSession={attendanceSession} selfCheckIn={selfCheckIn}
               myPos={myPos} onShowOnMap={onShowOnMap} />
           )}
-          {tab === "chat" && <ChatTab chat={chat} me={me} onSend={sendMessage} />}
+          {tab === "chat" && <ChatTab chat={chatView} me={me} onSend={sendMessage} offline={offline} smsTargets={smsTargets} />}
           {tab === "itinerary" && <ItineraryTab tripDates={tripDates} setTripDates={setTripDates} itinerary={itinerary} isGuide={isGuide} onAdd={addItineraryItem} onDelete={deleteItineraryItem} />}
           {tab === "map" && (
-            <MapTab members={members} me={me} locations={locations} myPos={myPos}
+            <MapTab tourCode={tour.code} offline={offline} online={online} smsTargets={smsTargets} members={members} me={me} locations={locations} myPos={myPos}
               sharing={sharing} toggleSharing={toggleSharing} geoStatus={geoStatus}
               keepAwake={keepAwake} setKeepAwake={setKeepAwake}
               focusId={mapFocus} clearFocus={() => setMapFocus(null)} />
@@ -1363,6 +1550,21 @@ export default function TourLinkApp() {
                   );
                 })}
               </div>
+              <div className="tl-sos-offline">
+                <div className="tl-eyebrow">No internet? Use your phone signal</div>
+                {smsTargets.length > 0 ? (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {!isGuide && guidePhone && <a className="tl-call-btn" style={{ flex: 1, margin: 0 }} href={`tel:${guidePhone}`}>Call guide</a>}
+                    <a className="tl-call-btn" style={{ flex: 1, margin: 0, background: "var(--ink)" }} href={smsHref(smsTargets, sosSmsBody())}>
+                      {isGuide ? "Text group: SOS + location" : "Text guide: SOS + location"}
+                    </a>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: "rgba(27,30,61,0.7)", lineHeight: 1.5 }}>
+                    {isGuide ? "Members haven't added phone numbers yet." : "Your guide hasn't added a phone number yet."} Numbers are added in Home → Contacts.
+                  </div>
+                )}
+              </div>
               <button className="tl-ghost-btn" style={{ color: "var(--ink)", borderColor: "var(--line)" }} onClick={() => setShowSosModal(false)}>Cancel</button>
             </div>
           </div>
@@ -1373,6 +1575,76 @@ export default function TourLinkApp() {
 }
 
 /* ---------------- HOME ---------------- */
+function ContactsCard({ tour, members, me, isGuide, tripDates, onSavePhone }) {
+  const guide = members.find((m) => m.role === "guide");
+  const myEntry = members.find((m) => m.id === me.id);
+  const [editing, setEditing] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [err, setErr] = useState("");
+  const emergency = (tripDates.emergency || "").replace(/[^\d+]/g, "");
+  const others = isGuide ? members.filter((m) => m.id !== me.id) : [];
+
+  const Row = ({ name, sub, num }) => (
+    <div className="tl-row">
+      <div className="tl-avatar">{initials(name)}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: 13 }}>{name}</div>
+        <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.55)" }}>{num ? `${sub} · ${num}` : `${sub} · no number yet`}</div>
+      </div>
+      {num && (
+        <div style={{ display: "flex", gap: 6 }}>
+          <a className="tl-mini-btn" style={{ textDecoration: "none", background: "var(--success)", color: "#fff" }} href={`tel:${cleanPhone(num)}`}>Call</a>
+          <a className="tl-mini-btn" style={{ textDecoration: "none" }} href={smsHref([cleanPhone(num)], `Hi ${name}, it's ${me.name} from ${tour.name}.`)}>Text</a>
+        </div>
+      )}
+    </div>
+  );
+
+  function save() {
+    if (!validPhone(phone)) { setErr("Enter a valid mobile number with country code, e.g. +63 912 345 6789."); return; }
+    setErr("");
+    onSavePhone(cleanPhone(phone));
+    setEditing(false);
+    setPhone("");
+  }
+
+  return (
+    <div className="tl-card">
+      <div className="tl-card-title"><Phone size={16} color="var(--saffron-deep)" /> Contacts &amp; emergency calls</div>
+      <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.55)", marginBottom: 6, lineHeight: 1.5 }}>
+        Calling and texting use your phone signal, so they work even when there is no internet.
+      </div>
+      {emergency && (
+        <div className="tl-row">
+          <div className="tl-avatar" style={{ background: "var(--alert)" }}><AlertTriangle size={16} /></div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Local emergency number</div>
+            <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.55)" }}>{tripDates.emergency}</div>
+          </div>
+          <a className="tl-mini-btn" style={{ textDecoration: "none", background: "var(--alert)", color: "#fff" }} href={`tel:${emergency}`}>Call</a>
+        </div>
+      )}
+      {guide && guide.id !== me.id && <Row name={guide.name} sub="Tour Guide" num={guide.phone} />}
+      {others.map((m) => <Row key={m.id} name={m.name} sub={m.role === "guide" ? "Guide" : "Member"} num={m.phone} />)}
+      <div style={{ paddingTop: 10, fontSize: 12.5 }}>
+        {myEntry && myEntry.phone ? <span>Your number: <strong>{myEntry.phone}</strong> {isGuide ? "" : "(only your guide sees it)"} </span> : <span style={{ color: "rgba(27,30,61,0.6)" }}>Add your mobile number so your guide can reach you if the internet is down. </span>}
+        {!editing && <button className="tl-mini-btn" onClick={() => setEditing(true)}>{myEntry && myEntry.phone ? "Change" : "Add my number"}</button>}
+      </div>
+      {editing && (
+        <div style={{ marginTop: 8 }}>
+          <input className="tl-input" type="tel" inputMode="tel" placeholder="+63 912 345 6789" value={phone} onChange={(e) => setPhone(e.target.value)} />
+          {err && <div style={{ fontSize: 12, color: "var(--alert)", marginTop: 6 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button className="tl-primary-btn" onClick={save}>Save number</button>
+            <button className="tl-ghost-btn" style={{ marginTop: 0 }} onClick={() => { setEditing(false); setErr(""); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 const WEATHER_CODES = {
   0: "Clear sky", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast", 45: "Fog", 48: "Fog",
   51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain",
@@ -1396,7 +1668,7 @@ function useWeather(lat, lng) {
   return w;
 }
 
-function HomeTab({ tripDates, me, isGuide, tour, members, itinerary, activeSos, resolveSos, checkedInCount, setTab, attendanceSession, selfCheckIn, myPos }) {
+function HomeTab({ tripDates, me, isGuide, tour, members, itinerary, activeSos, resolveSos, checkedInCount, setTab, attendanceSession, selfCheckIn, myPos, onSavePhone }) {
   const nextItem = nextStop(itinerary, tripDates);
   const hasDated = sortedStops(itinerary, tripDates).some((x) => x.at);
   const untilStart = tripDates.start ? daysBetween(todayISO(), tripDates.start) : null;
@@ -1505,23 +1777,13 @@ function HomeTab({ tripDates, me, isGuide, tour, members, itinerary, activeSos, 
         </div>
       </div>
 
-      <div className="tl-card" onClick={() => setTab("more")} style={{ cursor: "pointer" }}>
-        <div className="tl-card-title"><Users size={16} color="var(--saffron-deep)" /> Quick contacts</div>
-        <div className="tl-row" style={{ borderBottom: "none", paddingBottom: 0 }}>
-          <div className="tl-avatar">{initials(tour.guideName)}</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 700, fontSize: 13 }}>{tour.guideName}</div>
-            <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.55)" }}>Tour Guide</div>
-          </div>
-          <ChevronRight size={16} color="rgba(27,30,61,0.35)" />
-        </div>
-      </div>
+      <ContactsCard tour={tour} members={members} me={me} isGuide={isGuide} tripDates={tripDates} onSavePhone={onSavePhone} />
     </div>
   );
 }
 
 /* ---------------- CHAT ---------------- */
-function ChatTab({ chat, me, onSend }) {
+function ChatTab({ chat, me, onSend, offline, smsTargets }) {
   const [text, setText] = useState("");
   const listRef = useRef(null);
   useEffect(() => { const el = listRef.current; if (el) el.scrollTop = el.scrollHeight; }, [chat.length]);
@@ -1538,14 +1800,22 @@ function ChatTab({ chat, me, onSend }) {
             <div key={m.id} className={`tl-msg-row ${m.senderId === me.id ? "me" : ""}`}>
               <div>
                 {m.senderId !== me.id && <div className="tl-msg-sender">{m.sender}</div>}
-                <div className="tl-bubble">{m.text}<div className="tl-msg-time">{m.time}</div></div>
+                <div className="tl-bubble" style={m.pending ? { opacity: 0.7 } : undefined}>
+                  {m.text}
+                  <div className="tl-msg-time">{m.pending ? "⏳ not sent yet — will send when you're online" : m.time}</div>
+                </div>
               </div>
             </div>
           )
         )}
       </div>
+      {offline && smsTargets.length > 0 && (
+        <a className="tl-sms-bar" href={smsHref(smsTargets, text.trim() ? `${me.name}: ${text.trim()}` : `${me.name}: `)}>
+          <MessageSquare size={14} /> No internet — send this by SMS instead
+        </a>
+      )}
       <div className="tl-chat-input-row">
-        <input className="tl-chat-input" placeholder="Message the group…" value={text}
+        <input className="tl-chat-input" placeholder={offline ? "Message (saved and sent when online)…" : "Message the group…"} value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") send(); }} />
         <button className="tl-send-btn" onClick={send}><Send size={16} /></button>
@@ -1794,7 +2064,7 @@ function ItineraryTab({ itinerary, isGuide, onAdd, onDelete, tripDates, setTripD
   );
 }
 
-/* ---------------- MAP (real GPS + OpenStreetMap) ---------------- */
+/* ---------------- MAP (real GPS + OpenStreetMap + nearby search) ---------------- */
 function geoMessage(status) {
   switch (status) {
     case "on": return { tone: "ok", text: "Sharing your live location with the group." };
@@ -1807,12 +2077,25 @@ function geoMessage(status) {
   }
 }
 
-function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStatus, keepAwake, setKeepAwake, focusId, clearFocus }) {
+const PLACE_TYPES = [
+  ["hotel", "Hotels"], ["restaurant", "Food"], ["cafe", "Cafes"], ["hospital", "Hospitals"], ["pharmacy", "Pharmacy"], ["police", "Police"],
+  ["atm", "ATM / bank"], ["shop", "Shops"], ["toilets", "Toilets"], ["transport", "Transport"], ["fuel", "Fuel"], ["embassy", "Embassy"],
+];
+
+function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStatus, keepAwake, setKeepAwake, focusId, clearFocus, tourCode, offline, online, smsTargets }) {
   const mapEl = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef({});
+  const placesLayerRef = useRef(null);
+  const placeMarkersRef = useRef([]);
   const didFitRef = useRef(false);
   const [nowTick, setNowTick] = useState(0);
+  const [pCat, setPCat] = useState("hotel");
+  const [pNear, setPNear] = useState("");
+  const [pRadius, setPRadius] = useState(2000);
+  const [pBusy, setPBusy] = useState(false);
+  const [pErr, setPErr] = useState("");
+  const [pRes, setPRes] = useState(null);
 
   useEffect(() => {
     const t = setInterval(() => setNowTick((n) => n + 1), 30000);
@@ -1829,17 +2112,20 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
     mapRef.current = map;
+    placesLayerRef.current = L.layerGroup().addTo(map);
     const t = setTimeout(() => map.invalidateSize(), 150);
     return () => {
       clearTimeout(t);
       map.remove();
       mapRef.current = null;
+      placesLayerRef.current = null;
       markersRef.current = {};
+      placeMarkersRef.current = [];
       didFitRef.current = false;
     };
   }, []);
 
-  // draw / update one marker per member that has a location
+  // draw / update one marker per member that has a location (live or last saved)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -1892,6 +2178,59 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
     clearFocus();
   }, [focusId]);
 
+  // draw the nearby-search results
+  useEffect(() => {
+    const map = mapRef.current, layer = placesLayerRef.current;
+    if (!map || !layer) return;
+    layer.clearLayers();
+    placeMarkersRef.current = [];
+    if (!pRes) return;
+    const pts = [];
+    if (pRes.center) {
+      L.marker([pRes.center.lat, pRes.center.lng], {
+        icon: L.divIcon({ html: '<div class="tl-place-center">★</div>', className: "tl-pin-wrap", iconSize: [26, 26], iconAnchor: [13, 13] }),
+      }).addTo(layer).bindPopup(`<strong>${escapeHtml(pRes.center.label)}</strong><br/>Search centre`);
+      pts.push([pRes.center.lat, pRes.center.lng]);
+    }
+    pRes.results.forEach((r, i) => {
+      const icon = L.divIcon({ html: `<div class="tl-place-pin">${i + 1}</div>`, className: "tl-pin-wrap", iconSize: [26, 26], iconAnchor: [13, 13] });
+      const popup = `<strong>${escapeHtml(r.name)}</strong><br/>${escapeHtml(fmtDistance(r.distance))}${r.address ? "<br/>" + escapeHtml(r.address) : ""}<br/><a href="${escapeHtml(directionsUrl(r.lat, r.lng))}" target="_blank" rel="noreferrer">Navigate</a>`;
+      placeMarkersRef.current.push(L.marker([r.lat, r.lng], { icon }).addTo(layer).bindPopup(popup));
+      pts.push([r.lat, r.lng]);
+    });
+    if (pts.length > 1) map.fitBounds(pts, { padding: [40, 40], maxZoom: 17 });
+    else if (pts.length === 1) map.setView(pts[0], 16);
+  }, [pRes]);
+
+  async function searchPlaces(cat) {
+    const category = typeof cat === "string" ? cat : pCat;
+    setPCat(category);
+    setPErr("");
+    if (!online) { setPErr("Searching needs internet. Your saved map and everyone's last positions still work."); return; }
+    const near = pNear.trim();
+    if (!near && !meLoc) { setPErr("Turn on location, or type a place name (for example your hotel or a landmark, with its city)."); return; }
+    setPBusy(true);
+    try {
+      const qs = new URLSearchParams({ category, radius: String(pRadius) });
+      if (near) qs.set("near", near);
+      else { qs.set("lat", String(meLoc.lat)); qs.set("lng", String(meLoc.lng)); }
+      const r = await storage.getJson(`/api/places?${qs.toString()}`, { "x-tour-code": tourCode });
+      if (!r.ok) { setPErr((r.data && r.data.error) || "The search failed. Please try again."); setPRes(null); return; }
+      setPRes(r.data);
+    } catch (e) {
+      setPErr("Can't reach the server. Check your internet and try again.");
+    } finally {
+      setPBusy(false);
+    }
+  }
+  function focusPlace(i) {
+    const mk = placeMarkersRef.current[i];
+    if (!mk || !mapRef.current) return;
+    mapRef.current.setView(mk.getLatLng(), 17);
+    mk.openPopup();
+    if (mapEl.current && mapEl.current.scrollIntoView) mapEl.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
   function fitGroup() {
     const map = mapRef.current;
     if (!map) return;
@@ -1908,14 +2247,16 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
     .map((m) => {
       const loc = m.id === me.id ? (myPos || locations[m.id]) : locations[m.id];
       const dist = loc && meLoc && m.id !== me.id ? distanceMeters(meLoc.lat, meLoc.lng, loc.lat, loc.lng) : null;
+      const brg = dist != null ? bearingDeg(meLoc.lat, meLoc.lng, loc.lat, loc.lng) : null;
       const stale = loc ? Date.now() - loc.ts > STALE_MS : false;
-      return { m, loc, dist, stale };
+      return { m, loc, dist, brg, stale };
     })
     .sort((a, b) => (a.m.id === me.id ? -1 : b.m.id === me.id ? 1 : (a.dist ?? 1e12) - (b.dist ?? 1e12)));
 
   const msg = geoMessage(geoStatus);
   const toneColor = msg.tone === "ok" ? "var(--success)" : msg.tone === "bad" ? "var(--alert)" : "var(--saffron-deep)";
   const anyLoc = rows.some((r) => r.loc);
+  const typeLabel = (PLACE_TYPES.find((t) => t[0] === pCat) || [])[1] || "places";
 
   return (
     <div>
@@ -1924,12 +2265,70 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
       <div className="tl-geo-status" style={{ borderColor: toneColor, color: toneColor }}>
         {msg.text}{geoStatus === "on" && myPos ? ` (±${myPos.acc} m)` : ""}
       </div>
+      {offline && (
+        <div className="tl-geo-status" style={{ borderColor: "var(--saffron-deep)", color: "var(--saffron-deep)" }}>
+          Offline: the map only shows pictures of areas you viewed before. Distances and directions to everyone's last saved position still work, using your phone's GPS.
+        </div>
+      )}
 
       <div className="tl-leaflet" ref={mapEl} />
 
-      <div style={{ display: "flex", gap: 8, margin: "10px 0 14px" }}>
+      <div style={{ display: "flex", gap: 8, margin: "10px 0 14px", flexWrap: "wrap" }}>
         <button className="tl-chip-btn" onClick={fitGroup}>Show whole group</button>
         <button className="tl-chip-btn" onClick={centerOnMe} disabled={!meLoc}>Center on me</button>
+        {meLoc && smsTargets.length > 0 && (
+          <a className="tl-chip-btn" style={{ textAlign: "center", textDecoration: "none", display: "flex", alignItems: "center", justifyContent: "center" }}
+            href={smsHref(smsTargets, `${me.name}'s location: ${mapsLink(meLoc.lat, meLoc.lng)} (±${meLoc.acc ?? "?"} m)`)}>
+            Text my location
+          </a>
+        )}
+      </div>
+
+      <div className="tl-card">
+        <div className="tl-card-title" style={{ marginBottom: 8 }}><Search size={16} color="var(--saffron-deep)" /> Find nearby places</div>
+        <div className="tl-pill-row" style={{ marginBottom: 10 }}>
+          {PLACE_TYPES.map(([id, label]) => (
+            <div key={id} className="tl-pill" style={{ cursor: "pointer", background: pCat === id ? "var(--saffron)" : "var(--sand-deep)" }} onClick={() => searchPlaces(id)}>{label}</div>
+          ))}
+        </div>
+        <div className="tl-field-row">
+          <div className="tl-field" style={{ flex: 2, marginBottom: 8 }}>
+            <label>Near (empty = my location)</label>
+            <input className="tl-input" placeholder="e.g. Rizal Park, Manila" value={pNear} onChange={(e) => setPNear(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") searchPlaces(); }} />
+          </div>
+          <div className="tl-field" style={{ marginBottom: 8 }}>
+            <label>Radius</label>
+            <select className="tl-input" value={pRadius} onChange={(e) => setPRadius(Number(e.target.value))}>
+              <option value={1000}>1 km</option><option value={2000}>2 km</option><option value={5000}>5 km</option>
+            </select>
+          </div>
+        </div>
+        <button className="tl-primary-btn" disabled={pBusy} onClick={() => searchPlaces()}>{pBusy ? "Searching…" : `Search ${typeLabel.toLowerCase()}`}</button>
+        {pErr && <div style={{ fontSize: 12.5, color: "var(--alert)", marginTop: 10, lineHeight: 1.5 }}>{pErr}</div>}
+        {pRes && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.6)", marginBottom: 4 }}>
+              Around <strong>{pRes.center.label}</strong> · {pRes.results.length} found
+            </div>
+            {pRes.results.length === 0 && <div className="tl-empty" style={{ padding: "12px 6px" }}>Nothing found. Try a bigger radius.</div>}
+            {pRes.results.map((r, i) => (
+              <div className="tl-row" key={`${r.name}-${i}`}>
+                <div className="tl-place-pin" style={{ flexShrink: 0 }}>{i + 1}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>{r.name}</div>
+                  <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.6)" }}>{fmtDistance(r.distance)} · ~{walkMinutes(r.distance)} min walk{r.address ? ` · ${r.address}` : ""}</div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap" }}>
+                    <button className="tl-mini-btn" onClick={() => focusPlace(i)}>On map</button>
+                    <a className="tl-mini-btn" style={{ textDecoration: "none" }} href={directionsUrl(r.lat, r.lng)} target="_blank" rel="noreferrer">Navigate</a>
+                    {r.phone && <a className="tl-mini-btn" style={{ textDecoration: "none", background: "var(--success)", color: "#fff" }} href={`tel:${cleanPhone(r.phone)}`}>Call</a>}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div style={{ fontSize: 10.5, color: "rgba(27,30,61,0.45)", marginTop: 8 }}>Place data © OpenStreetMap contributors. Names and details can be incomplete — confirm before relying on them.</div>
+          </div>
+        )}
       </div>
 
       <div className="tl-card">
@@ -1950,7 +2349,7 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
       <div className="tl-card">
         <div className="tl-card-title" style={{ marginBottom: 4 }}><Users size={16} color="var(--saffron-deep)" /> Who's where</div>
         {!anyLoc && <div className="tl-empty">No locations yet. Allow location access, or add mock members from More → Test Tools.</div>}
-        {rows.map(({ m, loc, dist, stale }) => (
+        {rows.map(({ m, loc, dist, brg, stale }) => (
           <div className="tl-row" key={m.id}>
             <div className="tl-avatar" style={stale || !loc ? { background: "#9a9a9a" } : undefined}>{initials(m.name)}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -1960,10 +2359,13 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
               <div style={{ fontSize: 11.5, color: stale ? "var(--alert)" : "rgba(27,30,61,0.6)" }}>
                 {!loc
                   ? "No location shared"
-                  : `${stale ? "Offline · last seen " : "Updated "}${fmtAgo(loc.ts)}${dist != null ? ` · ${fmtDistance(dist)} away · ~${walkMinutes(dist)} min walk` : ""}`}
+                  : `${stale ? "Last seen " : "Updated "}${fmtAgo(loc.ts)}${dist != null ? ` · ${fmtDistance(dist)} to the ${cardinal(brg)} · ~${walkMinutes(dist)} min walk` : ""}`}
               </div>
             </div>
             <div style={{ textAlign: "right", flexShrink: 0 }}>
+              {dist != null && (
+                <div title={`${cardinal(brg)} of you`} style={{ display: "inline-block", fontSize: 20, lineHeight: 1, transform: `rotate(${Math.round(brg)}deg)`, color: stale ? "#9a9a9a" : "var(--teal)" }}>↑</div>
+              )}
               {loc && (
                 <div style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 11.5, justifyContent: "flex-end", color: (loc.battery ?? 100) < 20 ? "var(--alert)" : "rgba(27,30,61,0.6)" }}>
                   <Battery size={13} /> {loc.battery != null ? `${loc.battery}%` : "—"}
@@ -1975,6 +2377,9 @@ function MapTab({ members, me, locations, myPos, sharing, toggleSharing, geoStat
             </div>
           </div>
         ))}
+        {rows.some((r) => r.dist != null) && (
+          <div style={{ fontSize: 10.5, color: "rgba(27,30,61,0.45)", marginTop: 8 }}>The arrow points toward each person with north at the top of the screen. Works offline using your phone's GPS and their last saved position.</div>
+        )}
       </div>
     </div>
   );
@@ -2012,7 +2417,7 @@ function MoreTab(props) {
           notifyMissing={notifyMissing} notifyAllMissing={notifyAllMissing}
           itinerary={itinerary} tripDates={tripDates} locations={locations} myPos={myPos} onShowOnMap={onShowOnMap} />
       )}
-      {section === "ai" && <AIAssistantSection tour={tour} itinerary={itinerary} tripDates={tripDates} members={members} me={me} />}
+      {section === "ai" && <AIAssistantSection tour={tour} itinerary={itinerary} tripDates={tripDates} members={members} me={me} myPos={myPos} />}
       {section === "translate" && <TranslatorSection tourCode={tour.code} />}
       {section === "expenses" && <ExpensesSection members={members} me={me} isGuide={isGuide} expenses={expenses} addExpense={addExpense} currency={currency} setCurrency={setCurrency} />}
       {section === "gallery" && <GallerySection gallery={gallery} me={me} addGalleryPost={addGalleryPost} />}
@@ -2363,6 +2768,7 @@ function TranslatorSection({ tourCode }) {
   const [text, setText] = useState("");
   const [lang, setLang] = useState(() => { try { return localStorage.getItem("tl:lang") || ""; } catch (e) { return ""; } });
   const [needLang, setNeedLang] = useState(false);
+  const [saved, setSaved] = useState(() => { try { return JSON.parse(localStorage.getItem("tl:phrases") || "[]"); } catch (e) { return []; } });
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [errored, setErrored] = useState(false);
@@ -2386,13 +2792,21 @@ function TranslatorSection({ tourCode }) {
           messages: [{ role: "user", content: source }],
         }),
       });
-      const data = await response.json();
+      let data = {};
+      try { data = await response.json(); } catch (e) { data = {}; }
+      if (!response.ok) { setErrored(aiErrorMessage(response.status, data)); return; }
       const raw = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
       const clean = raw.replace(/^```json|```$/g, "").trim();
       const parsed = JSON.parse(clean);
       setResult({ source, translation: parsed.translation, pronunciation: parsed.pronunciation, lang });
+      const entry = { source, translation: parsed.translation, pronunciation: parsed.pronunciation, lang };
+      setSaved((cur) => {
+        const next = [entry, ...cur.filter((x) => !(x.source === source && x.lang === lang))].slice(0, 40);
+        try { localStorage.setItem("tl:phrases", JSON.stringify(next)); } catch (e) { /* ignore */ }
+        return next;
+      });
     } catch (e) {
-      setErrored(true);
+      setErrored(navigator.onLine ? true : "No internet. The translator needs a connection, but phrases you translated earlier are saved below.");
     } finally {
       setLoading(false);
     }
@@ -2425,7 +2839,7 @@ function TranslatorSection({ tourCode }) {
         </div>
 
         {loading && <div className="tl-ai-loading" style={{ marginTop: 10 }}><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> Translating…</div>}
-        {errored && <div style={{ fontSize: 12, color: "var(--alert)", marginTop: 10 }}>Couldn't translate that just now — try again.</div>}
+        {errored && <div style={{ fontSize: 12, color: "var(--alert)", marginTop: 10 }}>{typeof errored === "string" ? errored : "Couldn't translate that just now — try again."}</div>}
         {result && (
           <div style={{ marginTop: 12, padding: 12, background: "var(--sand)", borderRadius: 12 }}>
             <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 3 }}>{result.source}</div>
@@ -2435,6 +2849,21 @@ function TranslatorSection({ tourCode }) {
           </div>
         )}
       </div>
+
+      {saved.length > 0 && (
+        <div className="tl-card">
+          <div className="tl-card-title"><Languages size={16} color="var(--saffron-deep)" /> Saved translations (work offline)</div>
+          {saved.slice(0, 15).map((x, i) => (
+            <div className="tl-row" key={`${x.source}-${x.lang}-${i}`}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.55)" }}>{x.source} → {x.lang}</div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{x.translation}</div>
+                {x.pronunciation && <div style={{ fontSize: 11.5, color: "rgba(27,30,61,0.6)" }}>({x.pronunciation})</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="tl-card">
         <div className="tl-card-title"><Compass size={16} color="var(--saffron-deep)" /> Travel phrase assistant</div>
@@ -2454,68 +2883,75 @@ function TranslatorSection({ tourCode }) {
 }
 
 const AI_SUGGESTIONS = [
-  { icon: CalendarDays, label: "Today's schedule" },
+  { icon: CalendarDays, label: "What's on today?" },
+  { icon: MapPin, label: "Hotels near me" },
+  { icon: Heart, label: "Nearest hospital or pharmacy" },
+  { icon: Utensils, label: "Good food nearby" },
   { icon: Languages, label: "Translate: where is the restroom?" },
   { icon: ShoppingBag, label: "Packing tips for this trip" },
-  { icon: CloudRain, label: "What should I wear for the weather?" },
-  { icon: Compass, label: "What's nearby right now?" },
   { icon: AlertTriangle, label: "What do I do in an emergency?" },
 ];
 
-function AIAssistantSection({ tour, itinerary, tripDates, members, me }) {
+// turns web addresses in the AI's answer into tappable links
+function Linkified({ text }) {
+  const parts = String(text).split(/(https?:\/\/[^\s)]+)/g);
+  return parts.map((p, i) => (/^https?:\/\//.test(p) ? <a key={i} href={p} target="_blank" rel="noreferrer" style={{ color: "var(--teal)", fontWeight: 600 }}>Open link</a> : <span key={i}>{p}</span>));
+}
+
+function AIAssistantSection({ tour, itinerary, tripDates, members, me, myPos }) {
   const [messages, setMessages] = useState([
-    { id: uid(), role: "assistant", text: `Namaste ${me.name.split(" ")[0]}! I'm your TourLink AI assistant for ${tour.name}. Ask me about today's schedule, translations, nearby places, packing tips, or what to do in an emergency.` },
+    { id: uid(), role: "assistant", text: `Hi ${me.name.split(" ")[0]}! I'm the TourLink assistant for ${tour.name}. Ask about today's schedule, find real places near you or near any landmark (hotels, hospitals, food, ATMs), translations, packing tips or emergency steps.` },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [errored, setErrored] = useState(false);
-  const endRef = useRef(null);
+  const listRef = useRef(null);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [messages.length, loading]);
+  useEffect(() => { const el = listRef.current; if (el) el.scrollIntoView && el.scrollIntoView({ block: "end" }); }, [messages.length, loading]);
 
   function buildSystemPrompt() {
     const itineraryText = sortedStops(itinerary, tripDates)
       .map((i) => `${i.date || "undated"} ${i.time} — ${i.title}${i.location ? ` @ ${i.location}` : ""}${i.notes ? ` (${i.notes})` : ""}`)
       .join("\n");
-    return `You are the in-app AI travel assistant inside TourLink, a group tour coordination app. You are helping a traveler on the tour "${tour.name}", guided by ${tour.guideName}. The group has ${members.length} members. Today's date is ${todayISO()}${tripDates.start ? `; the trip runs ${tripDates.start} to ${tripDates.end || tripDates.start}` : ""}.
+    return `You are the in-app AI travel assistant inside TourLink, a group tour coordination app. You are helping a traveler on the tour "${tour.name}", guided by ${tour.guideName}. The group has ${members.length} members. Today's date is ${todayISO()}${tripDates.start ? `; the trip runs ${tripDates.start} to ${tripDates.end || tripDates.start}` : ""}.${tripDates.emergency ? ` The local emergency number is ${tripDates.emergency}.` : ""}
 
 Full itinerary:
 ${itineraryText || "No itinerary added yet."}
 
-Answer questions about the schedule, meeting times, packing, weather-appropriate clothing, translations of common phrases, nearby practical needs (restaurants, restrooms, ATMs, hospitals), and basic emergency guidance, using the itinerary above when relevant. If asked something outside your knowledge (like real-time weather or exact nearby businesses), say so honestly and suggest checking with the guide or a maps app instead of inventing details. Keep answers short, warm, and practical — 2-4 sentences unless a list is clearly needed. Never give specific medical, legal, or safety instructions beyond generic first-response advice; for real emergencies always direct them to use the app's SOS button and contact the guide.`;
+Help with the schedule and meeting times, packing, translations of common phrases, nearby places and basic emergency guidance. Use the itinerary above when relevant. You cannot see live traffic or live weather - say so if asked. Keep answers short, warm and practical (2-5 sentences, or a short list for places). Never give specific medical, legal or safety instructions beyond generic first-response advice; for real emergencies tell them to use the SOS button, call the local emergency number and contact the guide.`;
   }
+
+  function reply(text) { setMessages((cur) => [...cur, { id: uid(), role: "assistant", text }]); }
 
   async function send(text) {
     const trimmed = text.trim();
     if (!trimmed || loading) return;
-    const userMsg = { id: uid(), role: "user", text: trimmed };
-    const updated = [...messages, userMsg];
+    const updated = [...messages, { id: uid(), role: "user", text: trimmed }];
     setMessages(updated);
     setInput("");
+    if (!navigator.onLine) {
+      reply("You're offline, and the AI needs internet. Offline you can still: call or text your guide (Home → Contacts), use the SOS button, and see everyone's last known position on the Map tab.");
+      return;
+    }
     setLoading(true);
-    setErrored(false);
     try {
       const response = await fetch(`${import.meta.env.VITE_API_BASE || "http://localhost:3001"}/api/claude`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-tour-code": tour.code },
         body: JSON.stringify({
-          model: "claude-sonnet-5-5",
-          max_tokens: 1000,
+          max_tokens: 800,
           system: buildSystemPrompt(),
-          messages: updated
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .map((m) => ({ role: m.role, content: m.text })),
+          useTools: true,
+          userLocation: myPos ? { lat: myPos.lat, lng: myPos.lng } : undefined,
+          messages: updated.map((m) => ({ role: m.role, content: m.text })),
         }),
       });
-      const data = await response.json();
-      const textResp = (data.content || [])
-        .filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("\n") || "Sorry, I couldn't find an answer to that. Try asking your guide directly.";
-      setMessages((cur) => [...cur, { id: uid(), role: "assistant", text: textResp }]);
+      let data = {};
+      try { data = await response.json(); } catch (e) { data = {}; }
+      if (!response.ok) { reply(aiErrorMessage(response.status, data)); return; }
+      const textResp = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      reply(textResp || "The AI sent back an empty answer. Please ask again, or try the Map tab's Nearby search.");
     } catch (e) {
-      setErrored(true);
-      setMessages((cur) => [...cur, { id: uid(), role: "assistant", text: "I couldn't reach the assistant just now. Please try again in a moment." }]);
+      reply("I couldn't reach the TourLink server. Check your internet and try again (the first request after a quiet period can take up to a minute).");
     } finally {
       setLoading(false);
     }
@@ -2527,7 +2963,7 @@ Answer questions about the schedule, meeting times, packing, weather-appropriate
         <Sparkles size={20} style={{ flexShrink: 0, marginTop: 2 }} />
         <div>
           <div style={{ fontWeight: 700, fontSize: 14 }}>AI Travel Assistant</div>
-          <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>Knows this tour's itinerary. Can't see live traffic, weather, or real nearby listings — always confirm anything safety-critical with your guide.</div>
+          <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>Knows this tour's itinerary and looks up real places (OpenStreetMap) near you or near any landmark you name. Needs internet. Can't see live traffic or weather. Confirm anything safety-critical with your guide.</div>
         </div>
       </div>
 
@@ -2546,17 +2982,17 @@ Answer questions about the schedule, meeting times, packing, weather-appropriate
         {messages.map((m) => (
           <div key={m.id} className={`tl-ai-msg-row ${m.role === "user" ? "user" : ""}`}>
             {m.role === "assistant" && <div className="tl-ai-avatar"><Sparkles size={13} /></div>}
-            <div className="tl-ai-bubble">{m.text}</div>
+            <div className="tl-ai-bubble"><Linkified text={m.text} /></div>
           </div>
         ))}
         {loading && (
-          <div className="tl-ai-loading"><Loader2 size={13} className="tl-spin" style={{ animation: "spin 1s linear infinite" }} /> Thinking…</div>
+          <div className="tl-ai-loading"><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> Thinking… (place searches can take a few seconds)</div>
         )}
-        <div ref={endRef} />
+        <div ref={listRef} />
       </div>
 
       <div className="tl-ai-input-row">
-        <input className="tl-chat-input" placeholder="Ask about your trip…" value={input}
+        <input className="tl-chat-input" placeholder="e.g. hotels near Rizal Park, Manila" value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") send(input); }} />
         <button className="tl-send-btn" onClick={() => send(input)}><Send size={16} /></button>

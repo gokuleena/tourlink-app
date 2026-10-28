@@ -22,6 +22,13 @@ Open http://localhost:5173 . Location works on `localhost` and on any `https://`
 ## Calendar and trip details
 The guide sets the trip start/end dates and an optional local emergency number (Plan tab -> Trip details). Every stop has a real date and time, picked from a calendar with month and year selectors.
 
+## Offline and emergency features
+- **Installable app.** Open TourLink once with internet, then "Add to Home screen". After that the app opens with no internet and shows the last saved tour data.
+- **Chat and SOS never get lost.** Messages and SOS alerts written offline wait in an outbox on the phone and send automatically when the connection returns. The chat tab also offers "send by SMS instead".
+- **Calling and texting use the phone signal.** Everyone can add a mobile number (Home -> Contacts). The SOS screen has "Call guide" and "Text guide: SOS + location" buttons. The guide can text the whole group.
+- **Member finder works offline.** Distance and compass direction to everyone's last saved position, from your phone's own GPS. Map pictures are only available for areas viewed before (open the map around your hotel on Wi-Fi first).
+- **Nearby places and the AI assistant need internet.** Map -> Find nearby places (hotels, hospitals, pharmacies, ATMs...) uses OpenStreetMap data and needs no credits. The AI assistant uses the same data as a tool and needs Anthropic credits on the server.
+
 ## Live location
 Each phone shares its real GPS position while TourLink is open on screen. Browsers pause location when the screen
 locks or the app is in the background, so pins stop moving and show "last seen" after 5 minutes.
